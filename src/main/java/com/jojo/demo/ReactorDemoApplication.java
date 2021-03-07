@@ -31,20 +31,17 @@ public class ReactorDemoApplication {
 
     final Flux<Integer> intFlux = Flux.just(1, 2, 3, 4, 5, 6, 7);
 
+    // onNext signal
     intFlux.subscribe(onNext -> System.out.print(onNext + " "));
 
     System.out.println();
 
-    intFlux.log().flatMap(Mono::just, 2).subscribe();
+    // onError signal
+    Mono.error(new Throwable("Error"))
+        .subscribe(null, onError -> System.err.println(onError + " \n"));
 
-    Mono.just(2)
-        .doOnNext(
-            i -> {
-              // reactive way of wrapping checked exceptions
-              throw Exceptions.propagate(new Throwable("Error"));
-            })
-        .subscribe(
-            onNext -> System.out.println(onNext), onError -> System.err.println(onError + " \n"));
+    // onComplete signal
+    intFlux.subscribe(null, null, () -> System.out.print("Complete Signal Recieved \n"));
 
     // subscribe can handle 3 signal types
     intFlux.subscribe(
@@ -58,6 +55,10 @@ public class ReactorDemoApplication {
         .map(Integer::toHexString)
         .doOnComplete(() -> System.out.println(" Flux Complete"))
         .subscribe(onNext -> System.out.print(onNext + " "));
+
+    // log all signals
+    intFlux.log().subscribe();
+    System.out.println();
 
     /* Handling errors */
 
