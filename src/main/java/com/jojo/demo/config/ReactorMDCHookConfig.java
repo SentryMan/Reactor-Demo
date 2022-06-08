@@ -2,11 +2,13 @@ package com.jojo.demo.config;
 
 import java.util.Map;
 import java.util.stream.Collectors;
+
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+
 import org.reactivestreams.Subscription;
 import org.slf4j.MDC;
-import org.springframework.context.annotation.Configuration;
+
 import reactor.core.CoreSubscriber;
 import reactor.core.Scannable;
 import reactor.core.publisher.Hooks;
@@ -15,14 +17,16 @@ import reactor.util.context.Context;
 
 /**
  * Adds a Hook to every Reactor Operator <br>
- * This Hook adds values from the Reactor {@link Context} to the MDC map
+ * This Hook adds values from the Reactor {@link Context} to the MDC map slower because it affects
+ * every reactive stream, if speed is the name of the game, use the reactor logging util instead of
+ * using this class like a crutch
  *
  * @author nhn485
  * @see <a href="https://projectreactor.io/docs/core/release/reference/#hooks">Reactor Hooks</a>
  * @see <a href="https://projectreactor.io/docs/core/release/reference/#context">Adding Context to a
  *     reactive Sequence</a>
  */
-@Configuration
+// @Configuration
 public class ReactorMDCHookConfig {
   private static final String MDC_CONTEXT_REACTOR_KEY = ReactorMDCHookConfig.class.getName();
 
@@ -39,16 +43,12 @@ public class ReactorMDCHookConfig {
 }
 
 // class that copies the state of Reactor Context to MDC on the onNext and onError function.
-class MdcContextLifter<T> implements CoreSubscriber<T> {
-
-  private final CoreSubscriber<T> coreSubscriber;
-
-  public MdcContextLifter(Scannable scannable, CoreSubscriber<T> coreSubscriber) {
-    this.coreSubscriber = coreSubscriber;
-  }
+record MdcContextLifter<T>(Scannable scannable, CoreSubscriber<T> coreSubscriber)
+    implements CoreSubscriber<T> {
 
   @Override
   public void onSubscribe(Subscription subscription) {
+
     coreSubscriber.onSubscribe(subscription);
   }
 
@@ -85,13 +85,10 @@ class MdcContextLifter<T> implements CoreSubscriber<T> {
 
     if (!context.isEmpty()) {
       final Map<String, String> map =
-          context
-              .stream()
+          context.stream()
               .collect(Collectors.toMap(k -> k.getKey().toString(), v -> v.getValue().toString()));
 
       MDC.setContextMap(map);
-    } else {
-      MDC.clear();
-    }
+    } else MDC.clear();
   }
 }

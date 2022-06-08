@@ -2,17 +2,20 @@ package com.jojo.demo;
 
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.http.ResponseEntity;
-import org.springframework.util.concurrent.ListenableFuture;
-import org.springframework.web.client.AsyncRestTemplate;
-import com.jojo.demo.web.Handler;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
+
+import com.jojo.demo.domain.ResponseStatusRetry;
+
 import lombok.SneakyThrows;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
@@ -25,23 +28,34 @@ import reactor.util.function.Tuples;
 @SpringBootApplication
 public class ReactorDemoApplication {
 
-  public static void main(String[] args) throws InterruptedException, ExecutionException {
+  public static record O(int val) {}
+
+  // Debug and go through this line by line
+  public static void main(String[] args) {
 
     SpringApplication.run(ReactorDemoApplication.class, args);
 
     final Flux<Integer> intFlux = Flux.just(1, 2, 3, 4, 5, 6, 7);
 
-    // onNext signal
     intFlux.subscribe(onNext -> System.out.print(onNext + " "));
 
     System.out.println();
 
-    // onError signal
-    Mono.error(new Throwable("Error"))
-        .subscribe(null, onError -> System.err.println(onError + " \n"));
+    intFlux.log().subscribe(onNext -> System.out.print(onNext + " "));
 
-    // onComplete signal
-    intFlux.subscribe(null, null, () -> System.out.print("Complete Signal Recieved \n"));
+    System.out.println();
+
+    intFlux.log().limitRate(5).subscribe(onNext -> System.out.print(onNext + " "));
+
+    System.out.println();
+
+    Mono.just(2)
+        .doOnNext(
+            i -> {
+              throw new RuntimeException("Error");
+            })
+        .subscribe(
+            onNext -> System.out.println(onNext), onError -> System.err.println(onError + " \n"));
 
     // subscribe can handle 3 signal types
     intFlux.subscribe(
@@ -55,10 +69,6 @@ public class ReactorDemoApplication {
         .map(Integer::toHexString)
         .doOnComplete(() -> System.out.println(" Flux Complete"))
         .subscribe(onNext -> System.out.print(onNext + " "));
-
-    // log all signals
-    intFlux.log().subscribe();
-    System.out.println();
 
     /* Handling errors */
 
@@ -75,13 +85,19 @@ public class ReactorDemoApplication {
         .onErrorResume(ex -> Mono.just(56))
         .subscribe(System.out::println, System.err::println);
 
-    /**
-     * onErrorContinue is an Advanced and highly specialized operator for handling errors
-     *
-     * <p>onErrorContinue Changes Upstream ErrorMode to OnErrorContinue Which Recovers By Dropping
-     * incriminating elements from stream (no Error signal will propagate)
-     */
-    onErrorContinueDemo();
+    /* Retrying errors */
+
+    // retryWhen will resubscribe if conditions are met;
+    intFlux
+        .doOnNext(
+            i -> {
+              if (i > 5) throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR);
+            })
+        // Checkpoint Adds to StackTrace for Simple Debugging
+        .checkpoint("doOnNext Checkpoint")
+        .log()
+        .retryWhen(ResponseStatusRetry.getRetrySpecification())
+        .subscribe(null, ex -> System.err.println("Failed to retry"));
 
     /* Transforming data */
 
@@ -93,6 +109,7 @@ public class ReactorDemoApplication {
 
     // OnErrorMap alters Error signals flowing in the stream
     Mono.error(new Throwable("Error"))
+        .doOnError(System.err::println)
         .onErrorMap(RuntimeException::new)
         .subscribe(null, System.err::println);
 
@@ -145,7 +162,7 @@ public class ReactorDemoApplication {
 
     System.out.println();
 
-    /* TupleUtils can be useful to avoid calling multiple gets */
+    /* TupleUtils can be useful to avoid calling multiple get functions */
     Mono.zip(intMono1, intMono2, strMono)
         .subscribe(
             TupleUtils.consumer(
@@ -161,7 +178,7 @@ public class ReactorDemoApplication {
                 TupleUtils.function(
                     (t1, t2, t3) -> "Combined Response: " + t1 + " " + t2 + " " + t3));
 
-    // you can zip up to 8 Publishers at once to keep using tuple
+    // you can zip up to 8 Publishers at once and keep using tuple
     Flux.zip(
             intFlux,
             intMono1,
@@ -170,8 +187,20 @@ public class ReactorDemoApplication {
             Mono.just(21),
             Mono.just(new Object()),
             combinedMono,
-            Flux.just(new Double(223), new Double(3)))
+            Flux.just((double) 223, Double.valueOf(3)))
         .map(TupleUtils.function(ReactorDemoApplication::tuple8Combiner))
+        .subscribe(System.out::println);
+
+    /* Repeat a mono on a certain condition */
+    Mono.fromSupplier(() -> randomDelay().toMillis())
+        // repeatedly re-subscribe to the source Mono (this produces a Flux<Status>)
+        .repeatWhen(completed -> completed.delayElements(Duration.ofMillis(1000))) // (1)
+        .doOnNext(onNext -> System.out.print(onNext + " "))
+        // cancel the repeat cycle as soon as the condition is met
+        .filter(i -> i <= 169)
+        .next()
+        // set cycle to timeout if condition isn't met in Time
+        .timeout(Duration.ofMillis(10000))
         .subscribe(System.out::println);
 
     /* Transform Demonstration */
@@ -241,23 +270,41 @@ public class ReactorDemoApplication {
 
     System.out.println();
 
-    /* Converting Listenable Future to Mono */
-
-    final String endpoint = Handler.ENDPOINT + "/hello-world-demo";
-
-    // create exposes the internal signal emitter of the mono/flux API
-    Mono.<ResponseEntity<String>>create(
-            monoSink ->
-                listenableRequestFuture(endpoint)
-                    // emit signal for the future's success/error
-                    .addCallback(monoSink::success, monoSink::error))
-        .map(ResponseEntity::getBody)
-        .subscribe(System.out::print);
-
-    System.out.println();
-
     // shows difference in verbosity between futures and mono
     futureVsReactive();
+
+    /* Caching */
+
+    final Mono<Long> randomLong = Mono.fromSupplier(() -> randomDelay().toMillis());
+
+    // use your imagination and pretend this is redis or something
+    final Map<String, Long> cache = new HashMap<>();
+
+    final var key = "key";
+    final var cachedMono =
+        // lookup value using key
+        Mono.defer(() -> Mono.justOrEmpty(cache.get(key)))
+            // set source Mono and write into cache on miss
+            .switchIfEmpty(
+                randomLong
+                    //
+                    .doOnSuccess(v -> cache.put(key, v)));
+
+    // cache will miss first time because the map is empty
+    cachedMono.subscribe(System.out::println);
+
+    cachedMono.subscribe(System.out::println);
+    // if we clear the cache it will subscribe to source mono.
+    cache.clear();
+    cachedMono.subscribe(System.out::println);
+
+    /**
+     * onErrorContinue is an Advanced and highly specialized operator for handling errors
+     *
+     * <p>onErrorContinue Changes Upstream ErrorMode to OnErrorContinue Which Recovers By Dropping
+     * incriminating elements from stream (no Error signal will propagate)
+     */
+    onErrorContinueDemo();
   }
 
   static String tuple8Combiner(
@@ -266,7 +313,7 @@ public class ReactorDemoApplication {
   }
 
   static Duration randomDelay() {
-    return Duration.ofMillis((long) (Math.random() * ((500 - 0) + 1)) + 0);
+    return Duration.ofMillis((long) (Math.random() * (500 - 0 + 1)) + 0);
   }
 
   static Flux<Integer> transformer(Flux<Integer> intflux) {
@@ -280,56 +327,46 @@ public class ReactorDemoApplication {
         .doOnComplete(System.out::println);
   }
 
-  static ListenableFuture<ResponseEntity<String>> listenableRequestFuture(String s) {
-
-    final AsyncRestTemplate template = new AsyncRestTemplate();
-    return template.getForEntity(s, String.class);
-  }
-
   /**
    * Compares verbosity of Non-Blocking CompletableFuture vs Flux <br>
    * <br>
-   * The task is to asynchronously get the name, stat, and card of a given list of ID
+   * The task is to asynchronously get the name, stat, and card of a given list of ID, combine the
+   * results, and print to console
    */
   static void futureVsReactive() {
-
+    System.out.println();
+    System.out.println();
+    System.out.println();
+    System.out.println();
     final List<String> idlist = Arrays.asList("id1", "id2");
 
-    final Flux<String> idflux = Flux.fromIterable(idlist);
-
-    final Flux<String> combinations =
-        idflux.flatMap(
+    Flux.fromIterable(idlist)
+        .flatMap(
             id -> {
-              final Mono<String> nameTask = NameMono(id);
-              final Mono<Integer> statTask = StatMono(id);
-              final Mono<String> cardTask = cardMono(id);
+              final var nameTask = NameMono(id);
+              final var statTask = StatMono(id);
+              final var cardTask = cardMono(id);
 
               return Mono.zip(nameTask, statTask, cardTask)
                   .map(
                       TupleUtils.function(
                           (name, stat, card) ->
                               "Name " + name + " has stat " + stat + " and Card " + card));
-            });
-
-    final Mono<List<String>> resultMono = combinations.collectList();
-
-    resultMono.subscribe(System.out::println);
+            })
+        .subscribe(System.out::println);
 
     // vs
 
-    final CompletableFuture<List<String>> idListFuture =
-        CompletableFuture.supplyAsync(() -> idlist);
-
-    final CompletableFuture<List<String>> result =
-        idListFuture.thenComposeAsync(
+    CompletableFuture.supplyAsync(() -> idlist)
+        .thenComposeAsync(
             list -> {
               final Stream<CompletableFuture<String>> zip =
                   list.stream()
                       .map(
                           i -> {
-                            final CompletableFuture<String> nameTask = NameFuture(i);
-                            final CompletableFuture<Integer> statTask = StatFuture(i);
-                            final CompletableFuture<String> cardTask = cardFuture(i);
+                            final var nameTask = NameFuture(i);
+                            final var statTask = StatFuture(i);
+                            final var cardTask = cardFuture(i);
 
                             return nameTask
                                 .thenCombineAsync(statTask, Tuples::of)
@@ -349,20 +386,18 @@ public class ReactorDemoApplication {
               final CompletableFuture<String>[] combinationArray =
                   combinationList.toArray(new CompletableFuture[combinationList.size()]);
 
-              final CompletableFuture<Void> allDone = CompletableFuture.allOf(combinationArray);
+              final var allDone = CompletableFuture.allOf(combinationArray);
               return allDone.thenApply(
                   v ->
-                      combinationList
-                          .stream()
+                      combinationList.stream()
                           .map(CompletableFuture::join)
                           .collect(Collectors.toList()));
+            })
+        .thenApply(
+            list -> {
+              list.forEach(System.out::println);
+              return list;
             });
-
-    result.thenApply(
-        list -> {
-          System.out.println(list);
-          return list;
-        });
   }
 
   /**
@@ -441,38 +476,38 @@ public class ReactorDemoApplication {
 
   // Mono Tasks
   private static Mono<Integer> StatMono(String i) {
-    if (i.equals("id1")) return Mono.just(5);
-    else return Mono.just(2);
+    if ("id1".equals(i)) return Mono.just(5);
+    return Mono.just(2);
   }
 
   private static Mono<String> NameMono(String i) {
 
-    if (i.equals("id1")) return Mono.just("Joseph");
-    else return Mono.just("Giorno");
+    if ("id1".equals(i)) return Mono.just("Joseph");
+    return Mono.just("Giorno");
   }
 
   private static Mono<String> cardMono(String i) {
 
-    if (i.equals("id1")) return Mono.just("Capital One");
-    else return Mono.just("Chase");
+    if ("id1".equals(i)) return Mono.just("Capital One");
+    return Mono.just("Chase");
   }
 
   // future tasks
   private static CompletableFuture<String> NameFuture(String i) {
 
-    if (i.equals("id1")) return CompletableFuture.supplyAsync(() -> "Joseph");
-    else return CompletableFuture.supplyAsync(() -> "Giorno");
+    if ("id1".equals(i)) return CompletableFuture.supplyAsync(() -> "Joseph");
+    return CompletableFuture.supplyAsync(() -> "Giorno");
   }
 
   private static CompletableFuture<String> cardFuture(String i) {
 
-    if (i.equals("id1")) return CompletableFuture.supplyAsync(() -> "Capital One");
-    else return CompletableFuture.supplyAsync(() -> "Chase");
+    if ("id1".equals(i)) return CompletableFuture.supplyAsync(() -> "Capital One");
+    return CompletableFuture.supplyAsync(() -> "Chase");
   }
 
   private static CompletableFuture<Integer> StatFuture(String i) {
-    if (i.equals("id1")) return CompletableFuture.supplyAsync(() -> 5);
-    else return CompletableFuture.supplyAsync(() -> 2);
+    if ("id1".equals(i)) return CompletableFuture.supplyAsync(() -> 5);
+    return CompletableFuture.supplyAsync(() -> 2);
   }
 
   /**
